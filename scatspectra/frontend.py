@@ -98,7 +98,7 @@ def compute_sigma2(
     wav_type         : str,
     high_freq        : float,
     reflection_pad   : bool,
-    cuda             : bool,
+    device             : torch.device,
     nchunks          : int,
     histogram_moments: bool
 ) -> torch.Tensor:
@@ -110,24 +110,21 @@ def compute_sigma2(
     :param wav_type: wavelet type for each layer, e.g. 'battle_lemarie'
     :param high_freq: central frequency of mother wavelet for each layer, 0.5 may lead to important aliasing
     :param reflection_pad: use a reflection pad to account for edge effects
-    :param cuda: use GPU (cuda) for accelaerating computation
+    :param device: device
     """
-    # initialize model, here just a wavelet transform
-    model = Model(
-        model_type=None, gen_log_returns=True, T=x.shape[-1], r=1, J=J, Q=Q,
-        wav_type=wav_type, wav_norm='l1', high_freq=high_freq,
-        A=None, rpad=reflection_pad,
-        N=x.shape[1], multivariate_model=False,
-        sigma2=None, norm_on_the_fly=False,
-        estim_operator=None, qs=None, coeff_types=None,
-        dtype=x.dtype, 
-        histogram_moments=histogram_moments, histogram_norm=None,
-        skew_redundance=False, nchunks=nchunks
-    )
+    # initialize model
+    model = Model(model_type="scat_marginal", T=x.shape[-1], r=1, J=J, Q=Q,
+                  wav_type=wav_type, wav_norm=wav_norm, high_freq=high_freq,
+                  A=None, rpad=rpad, channel_transforms=None, N=x.shape[1],
+                  Ns=None, diago_n=True, cross_params=None,
+                  sigma2=None, sigma2_L1=None, sigma2_L2=None,
+                  sigma2_Lphix=None, norm_on_the_fly=False,
+                  estim_operator=None, qs=[2.0], coeff_types=None,
+                  dtype=x.dtype, histogram_moments=False,
+                  skew_redundance=False, nchunks=nchunks)
 
-    if cuda:
-        x = x.cuda()
-        model = model.cuda()
+    x = x.to(device)
+    model = model.to(device)
 
     # wavelet coefficients
     Wx = model.compute_scattering_coefficients(x[:,:,None,None,:], None)[0]
@@ -159,7 +156,7 @@ def analyze(
     multivariate   : bool = True, 
     qs             : list[float] = [1.0, 2.0], 
     estim_operator : Estimator | None = None, 
-    cuda           : bool = False, 
+    device           : torch.device = torch.device('cpu'), 
     nchunks        : int = 1
 ) -> DescribedTensor:
     """ Compute scattering based statistics on the provided data.
@@ -190,7 +187,7 @@ def analyze(
     :param qs: exponent to use in a "scat_marginal" or "scat+scat_spectra" model
     :param estim_operator: the operator computing the average on time <.>_t,
         uniform average by default. 
-    :param cuda: use GPU (cuda) for accelaerating computation
+    :param device: device
     :param nchunks: number of data chunks to process, increase it to reduce memory usage
     """
     if model_type not in ADMISSIBLE_MODEL_TYPES:
@@ -221,7 +218,7 @@ def analyze(
     # compute normalization
     if normalize is not None and sigma2 is None:
         sigma2 = compute_sigma2(
-            x, J, Q, wav_type, high_freq, reflection_pad, cuda, nchunks, False
+            x, J, Q, wav_type, high_freq, reflection_pad, device, nchunks, False
         )
         if normalize == 'batch_ps':
             sigma2 = sigma2.mean(0, keepdim=True)
@@ -242,9 +239,8 @@ def analyze(
     )
 
     # compute
-    if cuda:
-        x = x.cuda()
-        model = model.cuda()
+    x = x.to(device)
+    model.to(device)
     Rx = model(x)
     Rx.config = model.config
 
@@ -270,8 +266,7 @@ def analyze(
                 sigma2_bjr = sigma2[:, nr, :].reshape(sigma2.shape[0], -1, 1)
                 Rx.y[:, mask_ps, :] = Rx.y[:, mask_ps, :] * (sigma2_bjl * sigma2_bjr).pow(0.5)
 
-    if cuda:
-        Rx = Rx.cpu()
+    Rx = Rx.cpu()
 
     return Rx
 
@@ -306,7 +301,7 @@ def self_simi_obstruction_score(
     wav_type : str = 'battle_lemarie', 
     high_freq: float = 0.425,
     nchunks  : int = 1, 
-    cuda     : bool = False
+    device     : torch.device = torch.device('cpu'),
 ) -> tuple:
     """ Quantifies obstruction to self-similarity in a certain range of scales.
 
@@ -317,7 +312,7 @@ def self_simi_obstruction_score(
     :param wav_type: wavelet type for each layer, e.g. 'battle_lemarie'
     :param high_freq: central frequency of mother wavelet for each layer, 0.5 gives important aliasing
     :param nchunks: nb of chunks, increase it to reduce memory usage
-    :param cuda: does calculation on gpu
+    :param device: device
 
     :return:
         - score on white noise reference (gives the score estimation error)
@@ -328,17 +323,17 @@ def self_simi_obstruction_score(
         Rx = analyze(
             x, model_type='scat_spectra', r=2, J=J, Q=Q,
             wav_type=wav_type, high_freq=high_freq, normalize='batch_ps',
-            estim_operator=None, cuda=cuda, nchunks=nchunks
+            estim_operator=None, device=device, nchunks=nchunks
         ).mean_batch()
 
     # white noise reference score
     Rx_wn = None
     if x is not None:
-        x_wn = np.random.randn(*x.shape)
+        x_wn = np.random.randn(*x.shape).astype(np.float32)
         Rx_wn = analyze(
             x_wn, model_type='scat_spectra', r=2, J=J, Q=Q,
             wav_type=wav_type, high_freq=high_freq, normalize='batch_ps',
-            estim_operator=None, cuda=cuda, nchunks=nchunks
+            estim_operator=None, device=device, nchunks=nchunks
         ).mean_batch()
 
     def self_simi_score_spars(Rx):
@@ -417,7 +412,7 @@ def init_x0(
     sigma_dlnx = target_data.dlnx.std((0,2), keepdims=True)  # array of shape (N,)
 
     # Gaussian log-returns of same mean and std
-    dlnx0 = mean_dlnx + sigma_dlnx * np.random.randn(S, N, target_length)
+    dlnx0 = mean_dlnx + sigma_dlnx * np.random.randn(S, N, target_length).astype(np.float32)
 
     # renormalize the log-price time-series
     if not gen_log_returns:
@@ -462,7 +457,7 @@ def generate(
     cache_path        : Path | str | None = None,
     load_cache        : bool = True,
     trace_path        : Path | str | None = None,
-    cuda              : bool = False,
+    device              : torch.device = torch.device("cpu"),
     verbose           : bool = True
 ) -> PriceData:
     """ Generate time-series from a scattering model. 
@@ -504,7 +499,7 @@ def generate(
     :param cache_path: the directory used to store data
     :param load_cache: load already generated data
     :param trace_path: if provided, will save all the iterations of the data during gradient descent
-    :param cuda: use GPU (cuda) for accelaerating computation
+    :param device: device
     :param verbose: Verbosity level for logging
     """
     # arguments checks and formatting
@@ -578,7 +573,7 @@ def generate(
     # initialize normalization for the model (by average power spectrum)
     if x is not None:
         sigma2_target = compute_sigma2(
-            x, J, Q, wav_type, high_freq, reflection_pad, cuda, nchunks, False
+            x, J, Q, wav_type, high_freq, reflection_pad, device, nchunks, False
         )
     else:
         sigma2_target = Rx.query("coeff_type=='variance'").y.real
@@ -589,7 +584,7 @@ def generate(
     histogram_norm = None
     if histogram_moments:
         sigma2_lnmW = compute_sigma2(
-            x, J, Q, wav_type, high_freq, reflection_pad, cuda, nchunks, True
+            x, J, Q, wav_type, high_freq, reflection_pad, device, nchunks, True
         )
         filters = torch.tensor(
             [[1] * (2 ** j) + [0] * (gen_length-2**j) for j in range(J)], 
@@ -612,12 +607,11 @@ def generate(
         histogram_moments=histogram_moments, histogram_norm=histogram_norm,
         skew_redundance=True, nchunks=nchunks
     )
-    if cuda:
-        model = model.cuda()
-        if x is not None:
-            x = x.cuda()
-        if Rx is not None:
-            Rx = Rx.cuda()
+    model = model.to(device)
+    if x is not None:
+        x = x.to(device)
+    if Rx is not None:
+        Rx = Rx.to(device)
     if verbose:
         if model.all_coeff_types is not None:
             print(f"Model {model_type} based on {model.count_coefficients():,} statistics: ")
@@ -640,8 +634,7 @@ def generate(
                 histogram_moments=histogram_moments, histogram_norm=histogram_norm,
                 skew_redundance=True, nchunks=nchunks
             )
-            if cuda:
-                model_target = model_target.cuda()
+            model_target = model_target.to(device)
         else:
             model_target = model
         Rx = model_target(x)
@@ -680,7 +673,7 @@ def generate(
         # init solver and convergence criterium
         solver = Solver(
             shape=torch.Size((batch_size,N,gen_length)), model=model, loss=loss,
-            Rx_target=Rx, x0=x0_batch, cuda=cuda
+            Rx_target=Rx, x0=x0_batch, device=device
         )
         check_conv_criterion = CheckConvCriterion(
             solver=solver, tol=tol_optim, save_interval_data=trace_path and 1, verbose=verbose

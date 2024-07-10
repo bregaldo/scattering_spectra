@@ -5,7 +5,7 @@ from time import time
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.autograd import Variable, grad
+from torch.autograd import grad
 
 from scatspectra.description import DescribedTensor
 
@@ -32,7 +32,7 @@ class Solver(nn.Module):
         loss: nn.Module,
         Rx_target: DescribedTensor,
         x0: np.ndarray,
-        cuda: bool
+        device
     ):
         super(Solver, self).__init__()
 
@@ -41,16 +41,15 @@ class Solver(nn.Module):
 
         self.shape = shape
         self.nchunks = 1
-        self.is_cuda = cuda
+        self.device = device
         self.x0 = self.format(x0, requires_grad=False)
 
         self.result = np.inf, np.inf
 
         self.Rx_target = Rx_target
-        if cuda:
-            self.cuda()
-            if self.Rx_target is not None:
-                self.Rx_target = self.Rx_target.cuda()
+        self.to(self.device)
+        if self.Rx_target is not None:
+            self.Rx_target = self.Rx_target.to(self.device)
 
         # compute initial loss
         Rx0 = self.model(self.x0).mean_batch()
@@ -59,12 +58,12 @@ class Solver(nn.Module):
         Rnull.y.fill_(0)
         self.loss_norm = self.loss(Rnull, self.Rx_target)
 
-    def format(self, x: np.ndarray, requires_grad: bool = True) -> Variable:
+    def format(self, x: np.ndarray, requires_grad: bool = True) -> torch.Tensor:
         """ Transforms x into a compatible format for the embedding. """
-        x_torch = torch.tensor(x.reshape(self.shape))
-        if self.is_cuda:
-            x_torch = x_torch.cuda()
-        x_torch = Variable(x_torch, requires_grad=requires_grad)
+        x_torch = torch.tensor(x.reshape(self.shape)).float()
+        x_torch = x_torch.to(self.device)
+        #x_torch = Variable(x_torch, requires_grad=requires_grad)
+        x_torch.requires_grad = requires_grad
         return x_torch
 
     def joint(self, x: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -85,6 +84,8 @@ class Solver(nn.Module):
 
         # compute gradient
         grad_x, = grad([loss], [x_torch], retain_graph=True)
+        # loss.backward(retain_graph=True)
+        # grad_x = x_torch.grad
 
         # move to numpy
         grad_x = grad_x.contiguous().detach().cpu().numpy()

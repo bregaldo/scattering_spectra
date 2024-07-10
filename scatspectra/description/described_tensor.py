@@ -105,10 +105,11 @@ class DescribedTensor:
             config=self.config
         )
 
-    def cuda(self, device: str | None = None) -> DescribedTensor:
+    def to(self, device: str | None = None) -> DescribedTensor:
         return DescribedTensor(
-            x=None if self.x is None else self.x.cuda(device=device),
-            y=self.y.cuda(device=device),
+            x=None if self.x is None else self.x.to(device),
+            y=self.y.to(device),
             df=self.df,
             config=self.config
         )
+
