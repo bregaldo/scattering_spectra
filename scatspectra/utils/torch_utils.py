@@ -13,9 +13,7 @@ def is_double_tensor(z):
 
 
 def to_numpy(tensor):
-    if tensor.is_cuda:
-        return tensor.detach().cpu().numpy()
-    return tensor.detach().numpy()
+    return tensor.detach().cpu().numpy()
 
 
 def multid_where(a: Iterable, b: Iterable) -> List:

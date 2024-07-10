@@ -88,7 +88,7 @@ def load_data(
 ##################
 
 
-def compute_sigma2(x, J, Q, wav_type, wav_norm, high_freq, rpad, cuda, nchunks):
+def compute_sigma2(x, J, Q, wav_type, wav_norm, high_freq, rpad, device, nchunks):
     """Computes sigma(j)^2 = <|Wx(t,j)|^2>_t used to normalize wavelet coefficients. 
 
     :param x: input tensor of shape (batch_size, in_channels, ..., T)
@@ -98,7 +98,7 @@ def compute_sigma2(x, J, Q, wav_type, wav_norm, high_freq, rpad, cuda, nchunks):
     :param wav_norm: _description_
     :param high_freq: _description_
     :param rpad: _description_
-    :param cuda: _description_
+    :param device: _description_
     :return: _description_
     """
     # initialize model
@@ -112,9 +112,8 @@ def compute_sigma2(x, J, Q, wav_type, wav_norm, high_freq, rpad, cuda, nchunks):
                   dtype=x.dtype, histogram_moments=False,
                   skew_redundance=False, nchunks=nchunks)
 
-    if cuda:
-        x = x.cuda()
-        model = model.cuda()
+    x = x.to(device)
+    model = model.to(device)
 
     # compute sigma2
     sigma2 = model(x).y.real.reshape(x.shape[0], x.shape[1], -1)  # (B, N, J)
@@ -130,7 +129,7 @@ def analyze(
     diago_n=True, cross_params=None,
     qs=[1.0, 2.0], estim_operator=None,
     histogram_moments=False, skew_redundance=True,
-    cuda=False, nchunks=1
+    device="cpu", nchunks=1
 ):
     """ Compute scattering based model.
 
@@ -161,7 +160,7 @@ def analyze(
     :param qs: exponent to use in a "scat_marginal" or "scat+scat_spectra" model
     :param estim_operator: the operator computing the average on time <.>_t by,
         uniform average by default. 
-    :param cuda: does calculation on gpu
+    :param device: computation device
     """
     if model_type not in ADMISSIBLE_MODEL_TYPES:
         raise ValueError(f"Unrecognized model type {model_type}.")
@@ -194,7 +193,7 @@ def analyze(
     # compute normalization
     if normalize is not None and sigma2 is None:
         sigma2 = compute_sigma2(
-            x, J, Q, wav_type, wav_norm, high_freq, rpad, cuda, nchunks
+            x, J, Q, wav_type, wav_norm, high_freq, rpad, device, nchunks
         )
         if normalize == 'batch_ps':
             sigma2 = sigma2.mean(0, keepdim=True)
@@ -214,9 +213,8 @@ def analyze(
     )
 
     # compute
-    if cuda:
-        x = x.cuda()
-        model = model.cuda()
+    x = x.to(device)
+    model.to(device)
     Rx = model(x)
     Rx.config = model.config
 
@@ -241,8 +239,7 @@ def analyze(
                 sigma2_bj = sigma2[:, n, :].reshape(sigma2.shape[0], -1, 1)
                 Rx.y[:, mask_ps, :] = Rx.y[:, mask_ps, :] * sigma2_bj
 
-    if cuda:
-        Rx = Rx.cpu()
+    Rx = Rx.cpu()
 
     return Rx
 
@@ -403,7 +400,7 @@ class ScatGenerator(DataGeneratorBase):
             sigma2_target = compute_sigma2(
                 x_observed, config['J'], config['Q'],
                 config['wav_type'], config['wav_norm'], config['high_freq'],
-                config['rpad'], config['cuda'], config['nchunks']
+                config['rpad'], config['device'], config['nchunks']
             )
         else:
             sigma2_target = config['Rx'].query("coeff_type=='variance'").y.real
@@ -419,10 +416,10 @@ class ScatGenerator(DataGeneratorBase):
                       sigma2=sigma2_target,
                       estim_operator=None, A=None,
                       **config)
-        if config['cuda']:
-            model = model.cuda()
+        if config['device']:
+            model.to(config['device'])
             if x_observed is not None:
-                x_observed = x_observed.cuda()
+                x_observed = x_observed.to(config['device'])
 
         if config['Rx'] is None:
             if self.verbose: print("Preparing target representation")
@@ -450,7 +447,7 @@ class ScatGenerator(DataGeneratorBase):
                 x0_std = to_numpy(x_observed).std(-1, keepdims=True)
             else:
                 x0_mean, x0_std = 0.0, 1.0
-            x0 = np.random.randn(B, N, T)
+            x0 = np.random.randn(B, N, T).astype(np.float32)
             x0 -= np.mean(x0, axis=-1, keepdims=True)
             x0 /= np.std(x0, axis=-1, keepdims=True)
             x0 = x0_mean + x0_std * x0
@@ -464,7 +461,7 @@ class ScatGenerator(DataGeneratorBase):
         )
         solver = Solver(
             shape=torch.Size((B, N, T)), model=model, loss=loss,
-            Rx_target=Rx_target, x0=x0, cuda=config['cuda']
+            Rx_target=Rx_target, x0=x0, device=config['device']
         )
         check_conv_criterion = CheckConvCriterion(
             solver=solver, tol=config['tol_optim'], verbose=self.verbose
@@ -534,8 +531,9 @@ def generate(
     skew_redundance=True,
     nchunks=1,
     cache_path=None, exp_name=None,
-    cuda=False, gpus=None, num_workers=1,
-    verbose=True
+    gpus=None, num_workers=1,
+    verbose=True,
+    device="cpu"
 ):
 
     # to make torch with multiprocessing works
