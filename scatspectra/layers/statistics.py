@@ -26,7 +26,7 @@ class TimeAverage(Estimator):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.w is not None:
-            x = x[..., self.w]
+            x = torch.index_select(x, -1, self.w)
         return x.mean(-1, keepdim=True)
 
 
@@ -38,7 +38,7 @@ class WindowSelector(Estimator):
         self.w = torch.tensor(window, dtype=torch.int64)
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        return x[..., self.w]
+        return torch.index_select(x, -1, self.w)
     
 
 class AvgPooling(Estimator):
@@ -130,11 +130,14 @@ class Correlation(nn.Module):
         self.df_scale = create_scale_description(
             sc_idxer.sc_idces[rl-1], sc_idxer.sc_idces[rr-1], sc_idxer)
 
-        self.idx_l, self.idx_r = self.df_scale[['scl', 'scr']].values.T
+        idx_l, idx_r = self.df_scale[['scl', 'scr']].values.T
         if rl == 2:
-            self.idx_l -= sc_idxer.JQ(1) + 1
+            idx_l -= sc_idxer.JQ(1) + 1
         if rr == 2:
-            self.idx_r -= sc_idxer.JQ(1) + 1
+            idx_r -= sc_idxer.JQ(1) + 1
+        idx_l, idx_r = torch.tensor(idx_l), torch.tensor(idx_r)
+        self.register_buffer('idx_l', idx_l)
+        self.register_buffer('idx_r', idx_r)
 
         self.ave = ave or TimeAverage()
 
@@ -162,11 +165,12 @@ class Correlation(nn.Module):
 
         # select communicating scales
         scl, scr = self.idx_l, self.idx_r
-        xl, xr = sxl[:, :, scl, 0, :], sxr[:, :, scr, 0, :]
+        xl, xr = torch.index_select(sxl[..., 0, :], 2, scl), torch.index_select(sxr[..., 0, :], 2, scr)
 
         # select communicating channels
         nl, nr = self.get_channel_idx(sxl.shape[1], sxr.shape[1], multivariate)
-        xl, xr = xl[:, nl, ...], xr[:, nr, ...]
+        nl, nr = nl.to(xl.device), nr.to(xr.device)
+        xl, xr = torch.index_select(xl, 1, nl), torch.index_select(xr, 1, nr)
 
         y = self.ave(xl * xr.conj())
 

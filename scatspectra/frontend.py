@@ -124,7 +124,7 @@ def compute_sigma2(
                   skew_redundance=False, nchunks=nchunks)
 
     x = x.to(device)
-    model = model.to(device)
+    model.to(device)
 
     # wavelet coefficients
     Wx = model.compute_scattering_coefficients(x[:,:,None,None,:], None)[0]
