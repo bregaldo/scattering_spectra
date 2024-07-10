@@ -113,7 +113,7 @@ def compute_sigma2(x, J, Q, wav_type, wav_norm, high_freq, rpad, device, nchunks
                   skew_redundance=False, nchunks=nchunks)
 
     x = x.to(device)
-    model = model.to(device)
+    model.to(device)
 
     # compute sigma2
     sigma2 = model(x).y.real.reshape(x.shape[0], x.shape[1], -1)  # (B, N, J)

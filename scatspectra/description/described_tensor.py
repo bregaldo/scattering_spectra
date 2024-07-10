@@ -73,7 +73,7 @@ class DescribedTensor:
                 masks.append(self.df[key].isin(value).values.astype(bool))
             mask = np.logical_and.reduce(masks)
         return DescribedTensor(
-            y=self.y[:, mask, :],
+            y=torch.index_select(self.y, 1, torch.where(torch.tensor(mask).to(self.y.device))[0]),
             x=self.x,
             df=self.df[mask],
             config=self.config
